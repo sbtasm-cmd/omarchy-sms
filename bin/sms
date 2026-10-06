@@ -5,10 +5,14 @@
   sms list            all messages as JSON, newest first, plus the unread count
   sms read ID|--all   mark as read
   sms delete ID       delete a saved message
+  sms send NUMBER TEXT  send through ModemManager; prints {"ok": ..., "error": ...}
 """
+import hashlib
 import json
 import os
+import re
 import sys
+import time
 
 DATA_DIR = os.path.join(os.environ.get("XDG_DATA_HOME", os.path.expanduser("~/.local/share")),
                         "omarchy-sms", "messages")
@@ -59,6 +63,56 @@ def set_read(msg):
     os.replace(tmp, path_for(msg["id"]))
 
 
+def send(number, text):
+    """Send via ModemManager over D-Bus (no mmcli quoting issues), then keep
+    a copy in the store as an outgoing message."""
+    import gi
+    gi.require_version("Gio", "2.0")
+    from gi.repository import Gio, GLib
+
+    mm = "org.freedesktop.ModemManager1"
+    if not re.fullmatch(r"\+?[0-9]{3,20}", number):
+        return {"ok": False, "error": "Invalid phone number"}
+    if not text.strip():
+        return {"ok": False, "error": "Empty message"}
+    bus = Gio.bus_get_sync(Gio.BusType.SYSTEM, None)
+
+    def call(path, iface, method, args, reply, timeout=60000):
+        return bus.call_sync(mm, path, iface, method, args, GLib.VariantType(reply),
+                             Gio.DBusCallFlags.NONE, timeout, None).unpack()
+
+    try:
+        objects = call("/org/freedesktop/ModemManager1", "org.freedesktop.DBus.ObjectManager",
+                       "GetManagedObjects", None, "(a{oa{sa{sv}}})")[0]
+        modem = next((p for p, ifaces in objects.items() if mm + ".Modem.Messaging" in ifaces), None)
+        if not modem:
+            return {"ok": False, "error": "No modem with SMS support"}
+        props = GLib.Variant("(a{sv})", ({"number": GLib.Variant("s", number),
+                                          "text": GLib.Variant("s", text)},))
+        sms_path = call(modem, mm + ".Modem.Messaging", "Create", props, "(o)")[0]
+        try:
+            call(sms_path, mm + ".Sms", "Send", None, "()", timeout=120000)
+        finally:
+            # The sent copy is kept in our store; don't let it pile up in ModemManager.
+            try:
+                call(modem, mm + ".Modem.Messaging", "Delete", GLib.Variant("(o)", (sms_path,)), "()")
+            except GLib.Error:
+                pass
+    except GLib.Error as e:
+        return {"ok": False, "error": e.message.split(":", 2)[-1].strip()}
+
+    # Same timestamp style as ModemManager ("2026-10-06T14:43:38+03"), so sorting stays right.
+    tz = time.strftime("%z")
+    now = time.strftime("%Y-%m-%dT%H:%M:%S") + (tz[:3] if tz.endswith("00") else tz)
+    digest = hashlib.sha1(f"out|{number}|{now}|{text}".encode()).hexdigest()[:10]
+    record = {"id": time.strftime("%Y%m%dT%H%M%S") + "-" + digest, "number": number, "text": text,
+              "timestamp": now, "savedAt": now, "direction": "out", "read": True}
+    os.makedirs(DATA_DIR, exist_ok=True)
+    with open(path_for(record["id"]), "w") as f:
+        json.dump(record, f, ensure_ascii=False, indent=1)
+    return {"ok": True, "error": "", "id": record["id"]}
+
+
 def main(args):
     cmd = args[0] if args else "list"
     if cmd == "list":
@@ -75,6 +129,10 @@ def main(args):
         except FileNotFoundError:
             pass
         remember_deleted(args[1])
+    elif cmd == "send" and len(args) == 3:
+        result = send(args[1], args[2])
+        print(json.dumps(result, ensure_ascii=False))
+        sys.exit(0 if result["ok"] else 1)
     else:
         sys.exit(__doc__)
 

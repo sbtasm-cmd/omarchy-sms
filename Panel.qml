@@ -36,6 +36,34 @@ Panel {
     copyProc.running = true
   }
 
+  // ---------- Compose / reply ----------
+  property bool composeOpen: false
+  property bool sending: false
+  property string sendError: ""
+
+  function isPhoneNumber(n) { return /^\+?[0-9]{3,20}$/.test(String(n || "")) }
+
+  function openCompose(number) {
+    sendError = ""
+    composeOpen = true
+    numberField.text = number || ""
+    textField.text = ""
+    if (number) textField.forceActiveFocus()
+    else numberField.forceActiveFocus()
+  }
+
+  function sendMessage() {
+    if (sending) return
+    var number = numberField.text.trim().replace(/[\s()-]/g, "")
+    var text = textField.text
+    if (!isPhoneNumber(number)) { sendError = "Enter a phone number, e.g. +380XXXXXXXXX"; return }
+    if (!text.trim()) { sendError = "Message is empty"; return }
+    sending = true
+    sendError = ""
+    sendProc.command = [smsPath, "send", number, text]
+    sendProc.running = true
+  }
+
   function formatTime(ts) {
     // "2026-10-06T14:43:38+03" -> "06.10 14:43"
     var m = String(ts || "").match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})/)
@@ -75,6 +103,25 @@ Panel {
   }
 
   Process { id: copyProc }
+
+  Process {
+    id: sendProc
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var r = {}
+        try { r = JSON.parse(String(text || "{}")) } catch (e) { r = { ok: false, error: "Sending failed" } }
+        root.sending = false
+        if (r.ok) {
+          root.composeOpen = false
+          textField.text = ""
+        } else {
+          root.sendError = r.error || "Sending failed"
+        }
+        root.refresh()
+      }
+    }
+  }
 
   Timer {
     interval: root.refreshSec * 1000
@@ -131,6 +178,78 @@ Panel {
             font.family: root.bar.fontFamily
             font.pixelSize: Style.font.title
             font.bold: true
+            anchors.verticalCenter: parent.verticalCenter
+          }
+
+          PanelActionButton {
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            iconText: String.fromCodePoint(0xf03eb)
+            tooltipText: "New message"
+            foreground: root.bar.foreground
+            onClicked: root.composeOpen ? (root.composeOpen = false) : root.openCompose("")
+          }
+        }
+
+        // ---------- Compose ----------
+        Column {
+          visible: root.composeOpen
+          width: parent.width
+          spacing: Style.space(6)
+
+          TextField {
+            id: numberField
+            width: parent.width
+            placeholderText: "To: +380XXXXXXXXX"
+            enabled: !root.sending
+            font.family: root.bar.fontFamily
+            font.pixelSize: Style.font.body
+            foreground: root.bar.foreground
+            onAccepted: textField.forceActiveFocus()
+          }
+
+          Row {
+            width: parent.width
+            spacing: Style.space(6)
+
+            TextField {
+              id: textField
+              width: parent.width - sendButton.width - parent.spacing
+              placeholderText: "Message"
+              enabled: !root.sending
+              font.family: root.bar.fontFamily
+              font.pixelSize: Style.font.body
+              foreground: root.bar.foreground
+              onAccepted: root.sendMessage()
+            }
+
+            Button {
+              id: sendButton
+              iconText: root.sending ? "" : String.fromCodePoint(0xf048a)
+              text: root.sending ? "…" : ""
+              tooltipText: "Send"
+              enabled: !root.sending
+              foreground: root.bar.foreground
+              fontFamily: root.bar.fontFamily
+              bordered: true
+              horizontalPadding: Style.spacing.controlPaddingX
+              verticalPadding: Style.spacing.controlPaddingY
+              anchors.verticalCenter: textField.verticalCenter
+              onClicked: root.sendMessage()
+            }
+          }
+
+          Text {
+            width: parent.width
+            wrapMode: Text.Wrap
+            textFormat: Text.PlainText
+            text: root.sendError !== "" ? root.sendError
+              : (textField.text.length ? textField.text.length + " characters" : "")
+            visible: text !== ""
+            color: root.sendError !== "" ? root.bar.urgent : root.bar.foreground
+            opacity: root.sendError !== "" ? 1.0 : 0.5
+            font.family: root.bar.fontFamily
+            font.pixelSize: Style.font.bodySmall
           }
         }
 
@@ -182,7 +301,7 @@ Panel {
                   anchors.verticalCenter: parent.verticalCenter
                   elide: Text.ElideRight
                   textFormat: Text.PlainText
-                  text: (card.modelData.number || "unknown") + "  ·  " + root.formatTime(card.modelData.timestamp)
+                  text: (card.modelData.direction === "out" ? "→ " : "") + (card.modelData.number || "unknown") + "  ·  " + root.formatTime(card.modelData.timestamp)
                   color: root.bar.foreground
                   font.family: root.bar.fontFamily
                   font.pixelSize: Style.font.bodySmall
@@ -194,6 +313,15 @@ Panel {
                   anchors.right: parent.right
                   anchors.verticalCenter: parent.verticalCenter
                   spacing: Style.space(2)
+
+                  PanelActionButton {
+                    visible: card.modelData.direction !== "out" && root.isPhoneNumber(card.modelData.number)
+                    iconText: String.fromCodePoint(0xf045a)
+                    tooltipText: "Reply"
+                    foreground: root.bar.foreground
+                    fontSize: Style.font.body
+                    onClicked: root.openCompose(card.modelData.number)
+                  }
 
                   PanelActionButton {
                     iconText: String.fromCodePoint(0xf018f)
