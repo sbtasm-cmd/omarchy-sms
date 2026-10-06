@@ -1,0 +1,166 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-or-later
+"""Save SMS received through ModemManager to disk and show a notification.
+
+Listens on the system bus for org.freedesktop.ModemManager1.Modem.Messaging
+"Added" signals, waits until each message is fully received (multipart SMS
+are assembled by ModemManager), and writes it as JSON to
+$XDG_DATA_HOME/omarchy-sms/messages/. On start, and whenever ModemManager
+(re)appears, it also picks up messages that arrived meanwhile. Messages are
+only read, never deleted from ModemManager, so no extra polkit rights are
+needed. Duplicates are skipped by a hash of number, timestamp, and text.
+"""
+import hashlib
+import json
+import os
+import subprocess
+import sys
+import time
+
+import gi
+
+gi.require_version("Gio", "2.0")
+from gi.repository import Gio, GLib  # noqa: E402
+
+MM = "org.freedesktop.ModemManager1"
+MM_PATH = "/org/freedesktop/ModemManager1"
+IFACE_MESSAGING = MM + ".Modem.Messaging"
+IFACE_SMS = MM + ".Sms"
+SMS_STATE_RECEIVED = 3
+SMS_PDU_TYPE_DELIVER = 1
+
+DATA_DIR = os.path.join(os.environ.get("XDG_DATA_HOME", os.path.expanduser("~/.local/share")),
+                        "omarchy-sms", "messages")
+
+bus = Gio.bus_get_sync(Gio.BusType.SYSTEM, None)
+waiting = {}  # sms path -> PropertiesChanged subscription id
+
+
+def log(msg):
+    print(msg, flush=True)
+
+
+def call(path, iface, method, args=None, reply="()"):
+    try:
+        return bus.call_sync(MM, path, iface, method, args, GLib.VariantType(reply),
+                             Gio.DBusCallFlags.NONE, 10000, None).unpack()
+    except GLib.Error as e:
+        log(f"{method} on {path} failed: {e.message}")
+        return None
+
+
+def sms_props(path):
+    res = call(path, "org.freedesktop.DBus.Properties", "GetAll", GLib.Variant("(s)", (IFACE_SMS,)), "(a{sv})")
+    return res[0] if res else None
+
+
+def message_id(number, timestamp, text):
+    digest = hashlib.sha1(f"{number}|{timestamp}|{text}".encode()).hexdigest()[:10]
+    stamp = time.strftime("%Y%m%dT%H%M%S")
+    return stamp, digest
+
+
+def already_saved(digest):
+    try:
+        return any(name.endswith(f"-{digest}.json") for name in os.listdir(DATA_DIR))
+    except FileNotFoundError:
+        return False
+
+
+def notify(number, text):
+    body = text if len(text) <= 300 else text[:297] + "…"
+    try:
+        subprocess.run(["notify-send", "-a", "SMS", "-i", "mail-message-new",
+                        f"SMS from {number or 'unknown'}", body], timeout=5, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+
+def save(path, props):
+    number = props.get("Number", "")
+    text = props.get("Text", "")
+    timestamp = props.get("Timestamp", "")
+    if not text and props.get("Data"):
+        text = "(binary message, %d bytes)" % len(props["Data"])
+    stamp, digest = message_id(number, timestamp, text)
+    if already_saved(digest):
+        return
+    os.makedirs(DATA_DIR, exist_ok=True)
+    record = {
+        "id": f"{stamp}-{digest}",
+        "number": number,
+        "text": text,
+        "timestamp": timestamp,
+        "savedAt": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+        "smsc": props.get("SMSC", ""),
+        "read": False,
+    }
+    tmp = os.path.join(DATA_DIR, record["id"] + ".json.tmp")
+    with open(tmp, "w") as f:
+        json.dump(record, f, ensure_ascii=False, indent=1)
+    os.replace(tmp, os.path.join(DATA_DIR, record["id"] + ".json"))
+    log(f"saved {record['id']} from {number}")
+    notify(number, text)
+
+
+def stop_waiting(path):
+    sub = waiting.pop(path, None)
+    if sub is not None:
+        bus.signal_unsubscribe(sub)
+
+
+def handle(path):
+    props = sms_props(path)
+    if props is None:
+        stop_waiting(path)
+        return
+    if props.get("PduType") != SMS_PDU_TYPE_DELIVER:
+        stop_waiting(path)
+        return
+    if props.get("State") == SMS_STATE_RECEIVED:
+        stop_waiting(path)
+        save(path, props)
+    elif path not in waiting:
+        # Multipart message still being assembled: wait for State to change.
+        waiting[path] = bus.signal_subscribe(MM, "org.freedesktop.DBus.Properties", "PropertiesChanged",
+                                             path, None, Gio.DBusSignalFlags.NONE,
+                                             lambda *a: handle(path))
+
+
+def on_added(_conn, _sender, _path, _iface, _signal, params):
+    sms_path, received = params.unpack()
+    if received:
+        handle(sms_path)
+
+
+def scan():
+    res = call(MM_PATH, "org.freedesktop.DBus.ObjectManager", "GetManagedObjects", None, "(a{oa{sa{sv}}})")
+    if not res:
+        return
+    for modem_path, ifaces in res[0].items():
+        if IFACE_MESSAGING not in ifaces:
+            continue
+        listed = call(modem_path, IFACE_MESSAGING, "List", None, "(ao)")
+        for sms_path in (listed[0] if listed else []):
+            handle(sms_path)
+
+
+def on_name_owner_changed(_conn, _sender, _path, _iface, _signal, params):
+    name, _old, new = params.unpack()
+    if name == MM and new:
+        # ModemManager restarted; give it a moment to export the modem.
+        GLib.timeout_add_seconds(15, lambda: (scan(), False)[1])
+
+
+def main():
+    os.makedirs(DATA_DIR, exist_ok=True)
+    bus.signal_subscribe(MM, IFACE_MESSAGING, "Added", None, None, Gio.DBusSignalFlags.NONE, on_added)
+    bus.signal_subscribe("org.freedesktop.DBus", "org.freedesktop.DBus", "NameOwnerChanged",
+                         "/org/freedesktop/DBus", MM, Gio.DBusSignalFlags.NONE, on_name_owner_changed)
+    scan()
+    log(f"watching for SMS, saving to {DATA_DIR}")
+    GLib.MainLoop().run()
+
+
+if __name__ == "__main__":
+    sys.exit(main())

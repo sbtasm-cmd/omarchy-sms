@@ -1,0 +1,71 @@
+#!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-or-later
+"""Manage SMS saved by sms-store.
+
+  sms list            all messages as JSON, newest first, plus the unread count
+  sms read ID|--all   mark as read
+  sms delete ID       delete a saved message
+"""
+import json
+import os
+import sys
+
+DATA_DIR = os.path.join(os.environ.get("XDG_DATA_HOME", os.path.expanduser("~/.local/share")),
+                        "omarchy-sms", "messages")
+
+
+def load():
+    messages = []
+    try:
+        names = os.listdir(DATA_DIR)
+    except FileNotFoundError:
+        names = []
+    for name in names:
+        if not name.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(DATA_DIR, name)) as f:
+                messages.append(json.load(f))
+        except (OSError, ValueError):
+            continue
+    messages.sort(key=lambda m: (m.get("timestamp") or "", m.get("id", "")), reverse=True)
+    return messages
+
+
+def path_for(msg_id):
+    if "/" in msg_id or msg_id.startswith("."):
+        sys.exit("bad id")
+    return os.path.join(DATA_DIR, msg_id + ".json")
+
+
+def set_read(msg):
+    if msg.get("read"):
+        return
+    msg["read"] = True
+    tmp = path_for(msg["id"]) + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(msg, f, ensure_ascii=False, indent=1)
+    os.replace(tmp, path_for(msg["id"]))
+
+
+def main(args):
+    cmd = args[0] if args else "list"
+    if cmd == "list":
+        messages = load()
+        print(json.dumps({"unread": sum(1 for m in messages if not m.get("read")),
+                          "messages": messages}, ensure_ascii=False))
+    elif cmd == "read" and len(args) == 2:
+        for msg in load():
+            if args[1] == "--all" or msg.get("id") == args[1]:
+                set_read(msg)
+    elif cmd == "delete" and len(args) == 2:
+        try:
+            os.unlink(path_for(args[1]))
+        except FileNotFoundError:
+            pass
+    else:
+        sys.exit(__doc__)
+
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

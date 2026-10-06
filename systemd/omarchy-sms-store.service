@@ -1,0 +1,11 @@
+[Unit]
+Description=Save SMS from ModemManager to disk (omarchy-sms)
+After=graphical-session.target
+
+[Service]
+ExecStart=%h/.config/omarchy/plugins/xmm7360.sms/bin/sms-store
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target

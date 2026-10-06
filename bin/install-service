@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Install and start the user service that saves incoming SMS (no root needed).
+set -euo pipefail
+unit_dir="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user"
+mkdir -p "$unit_dir"
+ln -sfn "$(cd "$(dirname "$0")/.." && pwd)/systemd/omarchy-sms-store.service" "$unit_dir/omarchy-sms-store.service"
+systemctl --user daemon-reload
+systemctl --user enable --now omarchy-sms-store.service
+systemctl --user --no-pager --lines=3 status omarchy-sms-store.service || true
