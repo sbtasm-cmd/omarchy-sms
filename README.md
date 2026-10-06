@@ -8,10 +8,11 @@ ModemManager.
 - **Sending:** **New message** (`󰏫`) in the header and **Reply** (`󰑚`) on messages from phone numbers. The message goes through ModemManager over D-Bus (`Messaging.Create` + `Sms.Send`), and a copy appears in the list as outgoing (`→`).
 - **Background service (`omarchy-sms-store`):** listens to ModemManager over D-Bus, saves every received SMS to `~/.local/share/omarchy-sms/messages/<id>.json`, and shows a desktop notification. It waits until multipart messages are fully assembled and picks up messages that arrived while it wasn't running. It only reads from ModemManager and never deletes, so it needs no extra privileges.
 
-ModemManager itself keeps SMS only in memory for modems without SIM/modem
-storage (for example XMM7360/L850-GL with the
-[xmm7360-lte](https://github.com/sbtasm-cmd/xmm7360-lte) fix), so they'd be
-lost on its restart. The service is what makes them persistent.
+Depending on the modem, ModemManager keeps SMS on the SIM or only in memory.
+In-memory messages are lost when ModemManager restarts, and SIM-stored ones
+come back after every restart, including ones you deleted. The service gives
+you one persistent inbox either way and remembers deletions, so removed
+messages stay removed.
 
 ## Install
 
