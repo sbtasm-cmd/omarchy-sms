@@ -32,6 +32,17 @@ def load():
     return messages
 
 
+# Messages can stay on the SIM and come back from ModemManager after every
+# restart, so deletions are remembered by digest (the id's suffix).
+DELETED = os.path.join(os.path.dirname(DATA_DIR), "deleted")
+
+
+def remember_deleted(msg_id):
+    digest = msg_id.rsplit("-", 1)[-1]
+    with open(DELETED, "a") as f:
+        f.write(digest + "\n")
+
+
 def path_for(msg_id):
     if "/" in msg_id or msg_id.startswith("."):
         sys.exit("bad id")
@@ -63,6 +74,7 @@ def main(args):
             os.unlink(path_for(args[1]))
         except FileNotFoundError:
             pass
+        remember_deleted(args[1])
     else:
         sys.exit(__doc__)
 
